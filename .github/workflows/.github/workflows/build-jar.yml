@@ -1,0 +1,54 @@
+name: Build Jar
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build-jar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up JDKs
+        uses: actions/setup-java@v6
+        with:
+          distribution: 'temurin'
+          # Gradle runs on 25; the classic modules use the 21 toolchain.
+          java-version: |
+            21
+            25
+          cache: 'gradle'
+
+      # JitPack builds ProtocolSupport on the first request and answers 404 until it
+      # is ready, so ask for the jar and wait (up to ~15 minutes) before Gradle needs it.
+      - name: Wait for ProtocolSupport on JitPack
+        run: |
+          URL="https://jitpack.io/com/github/ProtocolSupport/ProtocolSupport/master-66b494a8dd-1/ProtocolSupport-master-66b494a8dd-1.jar"
+          for i in $(seq 1 30); do
+            code=$(curl -sL -m 120 -o /dev/null -w '%{http_code}' "$URL" || true)
+            echo "attempt $i: HTTP $code"
+            if [ "$code" = "200" ]; then exit 0; fi
+            sleep 30
+          done
+          echo "JitPack never produced the ProtocolSupport jar"
+          exit 1
+
+      - name: Build Bukkit jar
+        env:
+          JAVA_HOME: ${{ env.JAVA_HOME_25_X64 }}
+        run: bash ./gradlew :bukkit:shadowJar -x test --no-daemon --console=plain
+
+      - name: Upload jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: FastLoginPlus-Bukkit
+          path: |
+            bukkit/build/libs/*.jar
+            !bukkit/build/libs/*-plain.jar
+          if-no-files-found: error

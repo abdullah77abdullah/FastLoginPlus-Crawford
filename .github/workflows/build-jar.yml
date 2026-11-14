@@ -25,19 +25,57 @@ jobs:
             25
           cache: 'gradle'
 
-      # JitPack builds ProtocolSupport on the first request and answers 404 until it
-      # is ready, so ask for the jar and wait (up to ~15 minutes) before Gradle needs it.
-      - name: Wait for ProtocolSupport on JitPack
+      # The ProtocolSupport library comes from JitPack, which sometimes cannot serve it.
+      # Ask for it a few times; if it never shows up the next step removes the optional
+      # ProtocolSupport integration so the jar still builds (ProtocolLib keeps working).
+      - name: Check ProtocolSupport on JitPack
+        id: ps
         run: |
           URL="https://jitpack.io/com/github/ProtocolSupport/ProtocolSupport/master-66b494a8dd-1/ProtocolSupport-master-66b494a8dd-1.jar"
-          for i in $(seq 1 30); do
+          for i in 1 2 3 4 5 6; do
             code=$(curl -sL -m 120 -o /dev/null -w '%{http_code}' "$URL" || true)
             echo "attempt $i: HTTP $code"
-            if [ "$code" = "200" ]; then exit 0; fi
-            sleep 30
+            if [ "$code" = "200" ]; then
+              echo "available=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 20
           done
-          echo "JitPack never produced the ProtocolSupport jar"
-          exit 1
+          echo "available=false" >> "$GITHUB_OUTPUT"
+
+      - name: Remove ProtocolSupport integration (JitPack jar unavailable)
+        if: steps.ps.outputs.available != 'true'
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, shutil, sys
+
+          root = pathlib.Path('.')
+          src = root / 'bukkit/src/main/java/com/github/games647/fastlogin/bukkit'
+          main = src / 'FastLoginBukkit.java'
+          text = main.read_text(encoding='utf-8')
+          text, n1 = re.subn(
+              r'^import com\.github\.games647\.fastlogin\.bukkit\.listener\.protocolsupport\.ProtocolSupportListener;\r?\n',
+              '', text, flags=re.M)
+          text, n2 = re.subn(
+              r'if \(pluginManager\.isPluginEnabled\("ProtocolSupport"\)\) \{\s*'
+              r'pluginManager\.registerEvents\(new ProtocolSupportListener\(this, antiBotService\), this\);\s*'
+              r'\} else if \(',
+              'if (', text)
+          if n1 != 1 or n2 != 1:
+              sys.exit(f'Could not patch FastLoginBukkit.java (import={n1}, branch={n2})')
+          main.write_text(text, encoding='utf-8')
+          shutil.rmtree(src / 'listener/protocolsupport')
+
+          gradle = root / 'gradle/platform-common.gradle'
+          g = gradle.read_text(encoding='utf-8')
+          g, n3 = re.subn(
+              r'^[ \t]*compileOnly\(libs\.protocol\.support\) \{ transitive = false \}\r?\n',
+              '', g, flags=re.M)
+          if n3 != 1:
+              sys.exit('Could not patch gradle/platform-common.gradle')
+          gradle.write_text(g, encoding='utf-8')
+          print('ProtocolSupport integration removed from the Bukkit build')
+          PY
 
       - name: Build Bukkit jar
         env:
